@@ -20,6 +20,12 @@ from monai.networks.nets import AttentionUnet
 st.set_page_config(page_title="TIMed - Sarcopenia IA", layout="wide")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Inicializar variáveis de estado (Memória do Streamlit)
+if 'analise_concluida' not in st.session_state:
+    st.session_state.analise_concluida = False
+    st.session_state.metricas = {}
+    st.session_state.imagem_resultado = None
+
 # ==========================================
 # PIPELINES MONAI E FUNÇÕES AUXILIARES
 # ==========================================
@@ -186,7 +192,10 @@ def processar_exame_ia(dicom_upload, nivel_vertebral, altura_m, sexo_str):
 # ==========================================
 # INTERFACE FRONTEND (STREAMLIT)
 # ==========================================
-st.title("🩺 TIMed - Análise Automatizada de Sarcopenia (V5)")
+st.title("Análise Automatizada de Sarcopenia (V5)")
+
+st.sidebar.title("TIMed")
+st.sidebar.markdown("---") # Linha de separação visual
 
 st.sidebar.header("Dados do Paciente")
 altura = st.sidebar.number_input("Altura (m) - Para cálculo do IMME", min_value=1.00, max_value=2.50, value=1.70, step=0.01)
@@ -210,42 +219,27 @@ st.sidebar.info(
 
 st.sidebar.markdown("---")
 st.sidebar.header("Upload do Exame")
-st.sidebar.warning("⚠️ Certifique-se de usar o Horos para anonimizar o DICOM antes do upload.")
+st.sidebar.warning("⚠️ Certifique-se de anonimizar o DICOM antes do upload.")
 dicom_file = st.sidebar.file_uploader("Selecione o arquivo DICOM (.dcm)", type=["dcm"])
 
+# ---------------------------------------------------------
+# BLOCO 1: APENAS PROCESSAMENTO E SALVAMENTO NA MEMÓRIA
+# ---------------------------------------------------------
 if dicom_file is not None:
     if st.sidebar.button("Processar Exame", type="primary"):
-        # Verifica se os modelos foram carregados corretamente
         if modelos_especialistas[nivel_vert] is None:
             st.error("Erro interno: Pesos do modelo não encontrados. Verifique os arquivos .pth.")
         else:
             with st.spinner('Processando imagem e extraindo métricas biomarcadoras...'):
+                
+                # 1. Executa a IA
                 fig, res_num = processar_exame_ia(dicom_file, nivel_vert, altura, sexo)
                 
-                st.subheader(f"Resultados da Avaliação: Nível {nivel_vert}")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Área Muscular Total", f"{res_num['Área (cm²)']} cm²")
+                # 2. Salva TUDO na memória (session_state)
+                st.session_state.res_num = res_num
+                st.session_state.fig = fig
                 
-                cor_delta = "normal" if res_num['Diagnóstico'] == "Normal" else "inverse"
-                col2.metric("IMME", f"{res_num['IMME']} cm²/m²", res_num['Diagnóstico'], delta_color=cor_delta)
-                col3.metric("Infiltração Lipídica", f"{res_num['Infiltração (%)']} %")
-                
-                st.pyplot(fig)
-                
-                # Prepara Downloads
-                img_buffer = io.BytesIO()
-                fig.savefig(img_buffer, format="png", bbox_inches='tight')
-                img_buffer.seek(0)
-                
-                col_btn1, col_btn2 = st.columns(2)
-                with col_btn1:
-                    st.download_button(
-                        label="💾 Baixar Painel de Imagens (PNG)",
-                        data=img_buffer,
-                        file_name=f"resultado_{nivel_vert}_paciente.png",
-                        mime="image/png"
-                    )
-                
+                # 3. Cria e atualiza a planilha Excel localmente
                 nome_arquivo_excel = "banco_dados_sarcopenia.xlsx"
                 nova_linha = {
                     "Data_Hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -262,10 +256,69 @@ if dicom_file is not None:
                     df_final = df_nova_linha
                 df_final.to_excel(nome_arquivo_excel, index=False)
                 
-                with col_btn2:
-                    with open(nome_arquivo_excel, "rb") as f:
-                        st.download_button(
-                            label="📊 Baixar Planilha Excel Atualizada",
-                            data=f, file_name="banco_dados_sarcopenia.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                # 4. Avisa o Streamlit que a análise acabou
+                st.session_state.analise_concluida = True
+
+
+# ---------------------------------------------------------
+# BLOCO 2: EXIBIÇÃO E DOWNLOADS (Fora do botão)
+# ---------------------------------------------------------
+if st.session_state.analise_concluida:
+    
+    # Resgata as variáveis da memória
+    res_num = st.session_state.res_num
+    fig = st.session_state.fig
+    nivel = res_num['Nível']
+    
+    st.subheader(f"Resultados da Avaliação: Nível {nivel}")
+    
+    # --- MÉTRICAS VISUAIS (Cards) ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Área Muscular Total", f"{res_num['Área (cm²)']} cm²")
+    cor_delta = "normal" if res_num['Diagnóstico'] == "Normal" else "inverse"
+    col2.metric("IMME", f"{res_num['IMME']} cm²/m²", res_num['Diagnóstico'], delta_color=cor_delta)
+    col3.metric("Infiltração Lipídica", f"{res_num['Infiltração (%)']} %")
+    
+    st.markdown("---")
+    
+    # --- LISTA DE INFORMAÇÕES COMPLETAS (Formato Colab) ---
+    st.markdown("### Resumo Clínico da Inferência")
+    st.text(f"""Modelo Executado       : Attention U-Net V5 ({nivel})
+Área Muscular Total    : {res_num['Área (cm²)']} cm²
+Índice Muscular (IMME) : {res_num['IMME']} cm²/m²
+Diagnóstico Sarcopenia : {res_num['Diagnóstico']}
+Área com Mioesteatose  : {res_num['Mioesteatose (cm²)']} cm²
+Infiltração Lipídica   : {res_num['Infiltração (%)']} %
+Densidade Média        : {res_num['Densidade (HU)']} HU""")
+    
+    # --- PLOTAGEM DA IMAGEM ---
+    st.pyplot(fig)
+    
+    st.markdown("---")
+    
+    # --- BOTÕES DE DOWNLOAD ---
+    # Prepara a imagem para o botão
+    img_buffer = io.BytesIO()
+    fig.savefig(img_buffer, format="png", bbox_inches='tight')
+    img_buffer.seek(0)
+    
+    col_btn1, col_btn2 = st.columns(2)
+    
+    with col_btn1:
+        st.download_button(
+            label="💾 Baixar Painel de Imagens (PNG)",
+            data=img_buffer,
+            file_name=f"resultado_{nivel}_paciente.png",
+            mime="image/png"
+        )
+    
+    with col_btn2:
+        nome_arquivo_excel = "banco_dados_sarcopenia.xlsx"
+        if os.path.exists(nome_arquivo_excel):
+            with open(nome_arquivo_excel, "rb") as f:
+                st.download_button(
+                    label="📊 Baixar Planilha Excel Atualizada",
+                    data=f, 
+                    file_name="banco_dados_sarcopenia.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
