@@ -127,6 +127,9 @@ def processar_exame_ia(dicom_upload, nivel_vertebral, altura_m, sexo_str):
         mask_total = cv2.resize(mask_pred, (img_hu.shape[1], img_hu.shape[0]), interpolation=cv2.INTER_NEAREST)
         mask_hu_valida = (img_hu >= -29) & (img_hu <= 150)
         mask_total = mask_total & mask_hu_valida
+        # Transpõe as matrizes para o formato (Altura, Largura) do DICOM/Matplotlib
+        img_hu = img_hu.T
+        mask_total = mask_total.T
         mask_total = pos_processar_mascara(mask_total, area_por_pixel_cm2, min_area_cm2=0.50)
         img_hu, mask_total = auto_alinhar_anatomia(img_hu, mask_total)
 
